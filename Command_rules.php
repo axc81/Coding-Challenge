@@ -1,76 +1,120 @@
 <?php
+
 /**
- * Class Command_rules
- * 
- * This class processes a CSV file and inserts user data into a PostgreSQL database.
- * It can operate in a dry-run mode where no actual insertions occur.
+ * Command_rules - Handles the processing of user data from a CSV file.
+ *
+ * This class reads a CSV file, validates the data, and inserts it into a PostgreSQL database.
+ * It also provides a dry-run mode to simulate the upload without making actual changes.
  */
-class Command_rules {
-    /**
-     * @var PDO $pdo The PDO instance for database connection
-     */
-    private PDO $pdo;
+
+class Command_rules
+{
+    private $pdo;      // PDO database connection
+    private $dryRun;   // Dry-run mode (true = simulate, false = insert data)
 
     /**
-     * @var bool $dryRun Flag to determine if operations should be executed or just simulated
+     * Constructor to initialize database connection and dry-run mode.
+     *
+     * @param PDO $pdo Database connection instance.
+     * @param bool $dryRun Flag to indicate dry-run mode.
      */
-    private bool $dryRun;
-
-    /**
-     * Command_rules constructor.
-     * 
-     * @param PDO $pdo The database connection instance
-     * @param bool $dryRun Whether to run in dry-run mode (default: false)
-     */
-    public function __construct(PDO $pdo, bool $dryRun = false) {
+    public function __construct(PDO $pdo, bool $dryRun)
+    {
         $this->pdo = $pdo;
         $this->dryRun = $dryRun;
     }
 
     /**
-     * Processes a CSV file and inserts valid user data into the database.
-     * 
-     * @param string $file The path to the CSV file
-     * @return void
+     * Processes the given CSV file and uploads valid data to the database.
+     *
+     * @param string $filename Path to the CSV file.
      */
-    public function processFile(string $file): void {
-        if (!file_exists($file)) {
-            die("Error: File not found: $file\n");
+    public function processFile(string $filename)
+    {
+        if (!file_exists($filename) || !is_readable($filename)) {
+            die("Error: Cannot read file $filename\n");
         }
 
-        if (($handle = fopen($file, "r")) !== FALSE) {
-            fgetcsv($handle); // Skip CSV header
-            while (($data = fgetcsv($handle)) !== FALSE) {
-                $this->processRow($data);
-            }
-            fclose($handle);
-        } else {
-            die("Error: Unable to open file.\n");
+        $handle = fopen($filename, "r");
+        if ($handle === false) {
+            die("Error: Unable to open file $filename\n");
         }
+
+        // Skip the header row
+        fgetcsv($handle, 1000, ",");
+
+        // Read each line from CSV file
+        while (($row = fgetcsv($handle, 1000, ",")) !== false) {
+            // Ignore empty rows
+            if (empty(array_filter($row))) {
+                continue;
+            }
+
+            // Ensure row has exactly 3 columns (name, surname, email)
+            if (count($row) < 3) {
+                echo "Invalid row (less than 3 columns): " . implode("|", $row) . "\n";
+                continue;
+            }
+
+            // Trim and sanitize inputs
+            $name = trim($row[0]);
+            $surname = trim($row[1]);
+            $email = trim($row[2]);
+
+            // Validate email format
+            if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+                echo "Invalid email: $email\n";
+                continue;
+            }
+
+            // Normalize name and surname (capitalize first letter)
+            $name = ucwords(strtolower($name));
+            $surname = ucwords(strtolower($surname));
+
+            // Check if email already exists
+            $checkSql = "SELECT COUNT(*) FROM users WHERE email = :email";
+            $checkStmt = $this->pdo->prepare($checkSql);
+            $checkStmt->execute([':email' => $email]);
+            $emailExists = $checkStmt->fetchColumn();
+
+            if ($emailExists) {
+                echo "Duplicated: $name $surname <$email>\n";
+                continue;
+            }
+
+            // Check for dry-run mode
+            if ($this->dryRun) {
+                echo "Processed: $name $surname <$email>\n";
+            } else {
+                $this->insertUser($name, $surname, $email);
+            }
+        }
+
+        fclose($handle);
     }
 
     /**
-     * Processes a single row of user data.
-     * 
-     * @param array $data The user data row (name, surname, email)
-     * @return void
+     * Inserts a new user into the database.
+     *
+     * @param string $name First name of the user.
+     * @param string $surname Last name of the user.
+     * @param string $email Email address of the user.
      */
-    private function processRow(array $data): void {
-        [$name, $surname, $email] = $data;
+    private function insertUser(string $name, string $surname, string $email)
+    {
+        // Insert new user
+        $sql = "INSERT INTO users (name, surname, email) VALUES (:name, :surname, :email)";
+        $stmt = $this->pdo->prepare($sql);
 
-        $name = ucfirst(strtolower(trim($name)));
-        $surname = ucfirst(strtolower(trim($surname)));
-        $email = strtolower(trim($email));
-
-        if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
-            echo "Invalid email: $email\n";
-            return;
+        try {
+            $stmt->execute([
+                ':name' => $name,
+                ':surname' => $surname,
+                ':email' => $email
+            ]);
+            echo "Processed: $name $surname <$email>\n";
+        } catch (PDOException $e) {
+            echo "Database error: " . $e->getMessage() . "\n";
         }
-
-        if (!$this->dryRun) {
-            $stmt = $this->pdo->prepare("INSERT INTO users (name, surname, email) VALUES (?, ?, ?) ON CONFLICT (email) DO NOTHING");
-            $stmt->execute([$name, $surname, $email]);
-        }
-        echo "Processed: $name $surname <$email>\n";
     }
 }
